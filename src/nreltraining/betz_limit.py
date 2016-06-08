@@ -1,45 +1,54 @@
-from openmdao.main.api import Assembly
-from openmdao.lib.drivers.api import SLSQPdriver
-from actuator_disc import ActuatorDisc #Import components from the plugin
+# Simple OpenMDAO problem that calculates the Betz limit on a wind turbine
+
 
 import time
 
-class Betz_Limit(Assembly):
+from openmdao.api import Problem, Group, ScipyOptimizer, IndepVarComp
+
+#Import components from the plugin
+from actuator_disc import ActuatorDisc
+
+
+class Betz_Limit(Group):
     """Simple wind turbine assembly to calculate the Betz Limit"""
 
-    # Inputs would go here
+    def __init__(self):
+        super(Betz_Limit, self).__init__()
 
-    # Outputs would go here
-    # Cp = Float(iotype="out", desc="Power Coefficient")
+        self.add('aDisc', ActuatorDisc(), promotes=['a', 'Area', 'rho', 'Vu'])
 
-    def configure(self):
-        """things to be configured go here"""
+        self.add('p_a', IndepVarComp('a', 0.5), promotes=['*'])
+        self.add('p_Area', IndepVarComp('Area', 10.0), promotes=['*'])
+        self.add('p_rho', IndepVarComp('rho', 1.225), promotes=['*'])
+        self.add('p_Vu', IndepVarComp('Vu', 10.0), promotes=['*'])
 
-        aDisc = self.add('aDisc', ActuatorDisc())
+        # The optimizer needs derivatives. We will finite difference the
+        # whole model with central difference to provide these.
+        self.deriv_options['type'] = 'fd'
+        self.deriv_options['form'] = 'central'
 
-        driver = self.add('driver', SLSQPdriver())
-
-        driver.add_parameter('aDisc.a', low=0, high=1)
-        driver.add_parameter('aDisc.Area', low=0, high=1)
-        driver.add_parameter('aDisc.rho', low=0, high=1)
-        driver.add_parameter('aDisc.Vu', low=0, high=1)
-
-        driver.add_objective('-aDisc.Cp')
-        driver.workflow.add('aDisc')
-
-        driver.tolerance = .00000001
-
-        # self.connect('self.Cp', 'self.aDisc.cp') #promote Cp to the assembly output
-
-        self.create_passthrough('aDisc.Cp') #shortcut for commented code above
 
 if __name__ == "__main__":
 
-    assembly = Betz_Limit()
-    assembly.driver.gradient_options.fd_form = 'central'
+    prob = Problem()
+    prob.root = Betz_Limit()
+
+    prob.driver = ScipyOptimizer()
+    prob.driver.options['optimizer'] = 'SLSQP'
+    prob.driver.options['tol'] = 1.0e-8
+
+    prob.driver.add_desvar('a', lower=0.0, upper=1.0)
+    prob.driver.add_desvar('Area', lower=0.0, upper=1.0)
+    prob.driver.add_desvar('rho', lower=0.0, upper=1.0)
+    prob.driver.add_desvar('Vu', lower=0.0, upper=1.0)
+
+    # Scaler -1.0 so that we maximize.
+    prob.driver.add_objective('aDisc.Cp', scaler=-1.0)
+
+    prob.setup()
+
     t = time.time()
-    assembly.run()
+    prob.run()
     print "time:", time.time() - t
-    print "execution count:", assembly.aDisc.exec_count
     print
-    print "Cp:", assembly.aDisc.Cp
+    print "Cp:", prob['aDisc.Cp']

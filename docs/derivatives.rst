@@ -2,223 +2,237 @@
 Using the OpenMDAO derivatives system
 =============================================================
 
-Many optimization algorithms make use of gradients. By default, OpenMDAO
-will finite difference it during the calculation of the full model gradient. However, an optimization process can often be sped up by having a component supply its own derivatives.
+Many optimization algorithms make use of gradients. By default, OpenMDAO will
+finite difference it during the calculation of the full model gradient.
+However, an optimization process can often be sped up by having a component
+supply its own derivatives.
 
 In OpenMDAO, derivatives can be specified in the component API by following
-these two steps:
+this one step:
 
-    1. Define a ``list_deriv_vars`` function that tell openmdao which inputs and outputs you have derivatives of
-    2. Define a ``provideJ`` method that calculates and returns the Jacobian.
+    1. Define a ``linearize`` function method that calculates and returns the Jacobian.
 
 Let's return to the actuator disc component, and show how derivatives can be specified:
 
 .. testcode:: simple_component_actuatordisk_review
 
-    from openmdao.main.api import Component
-    from openmdao.lib.datatypes.api import Float
+    from openmdao.api import Component
 
+    class ActuatorDisc(Component):
+        """Simple wind turbine model based on actuator disc theory"""
 
-    class ActuatorDisk(Component):
-        """Simple wind turbine model based on actuator disk theory"""
+        def __init__(self):
+            super(ActuatorDisc, self).__init__()
 
-        # inputs
-        a = Float(.5, iotype="in", desc="Induced Velocity Factor")
-        Area = Float(10, iotype="in", desc="Rotor disk area", units="m**2", low=0)
-        rho = Float(1.225, iotype="in", desc="air density", units="kg/m**3")
-        Vu = Float(10, iotype="in", desc="Freestream air velocity, upstream of rotor", units="m/s")
+            # Inputs
+            self.add_param('a', 0.5, desc="Induced Velocity Factor")
+            self.add_param('Area', 10.0, units="m**2", lower=0.0,
+                           desc="Rotor disc area")
+            self.add_param('rho', 1.225, units="kg/m**3",
+                           desc="air density")
+            self.add_param('Vu', 10.0, units="m/s",
+                           desc="Freestream air velocity, upstream of rotor")
 
-        # outputs
-        Vr = Float(iotype="out", desc="Air velocity at rotor exit plane", units="m/s")
-        Vd = Float(iotype="out", desc="Slipstream air velocity, downstream of rotor", units="m/s")
-        Ct = Float(iotype="out", desc="Thrust Coefficient")
-        thrust = Float(iotype="out", desc="Thrust produced by the rotor", units="N")
-        Cp = Float(iotype="out", desc="Power Coefficient")
-        power = Float(iotype="out", desc="Power produced by the rotor", units="W")
+            # Outputs
+            self.add_output('Vr', 0.0, units="m/s",
+                            desc="Air velocity at rotor exit plane")
+            self.add_output('Vd', 0.0, units="m/s",
+                            desc="Slipstream air velocity, downstream of rotor")
+            self.add_output('Ct', 0.0, desc="Thrust Coefficient")
+            self.add_output('thrust', 0.0, units="N",
+                            desc="Thrust produced by the rotor")
+            self.add_output('Cp', 0.0, desc="Power Coefficient")
+            self.add_output('power', 0.0, units="W",
+                            desc="Power produced by the rotor")
 
-        def execute(self):
-            # we use 'a' and 'Vu' a lot, so make method local variables
+        def solve_nonlinear(self, params, unknowns, resids):
+            """ Considering the entire rotor as a single disc that extracts
+            velocity uniformly from the incoming flow and converts it to
+            power."""
 
-            a = self.a
-            Vu = self.Vu
-            qA = .5*self.rho*self.Area*Vu**2
+            a = params['a']
+            Vu = params['Vu']
 
-            self.Vd = Vu*(1-2 * a)
-            self.Vr = .5*(self.Vu + self.Vd)
+            qA = .5*params['rho']*params['Area']*Vu**2
 
-            self.Ct = 4*a*(1-a)
-            self.thrust = self.Ct*qA
+            unknowns['Vd'] = Vd = Vu*(1-2 * a)
+            unknowns['Vr'] = .5*(Vu + Vd)
 
-            self.Cp = self.Ct*(1-a)
-            self.power = self.Cp*qA*Vu
+            unknowns['Ct'] = Ct = 4*a*(1-a)
+            unknowns['thrust'] = Ct*qA
+
+            unknowns['Cp'] = Cp = Ct*(1-a)
+            unknowns['power'] = Cp*qA*Vu
+
 
 Let's create a copy of this file called ``actuator_disc_derivatives.py``, that
 we will use to implement derivatives. Having it as a separate file from the
 derivates-free actuator disc file will allow for easy comparison later.
 
-The two function we need to add to the actuator disc component are 
-``list_deriv_vars`` and ``provideJ``.
-
-The first function indicates which derivatives you're proving.
-The order that you provide the variables in is important. 
-
-.. testcode:: simple_component_actuatordisk_listderivvars
-
-    def list_deriv_vars(self):
-        input_keys = ('a', 'Area', 'rho', 'Vu')
-        output_keys = ('Vr', 'Vd','Ct','thrust','Cp','power',)
-        return input_keys, output_keys
-
-
-The second function, ``provideJ``, calculates and returns a matrix (the Jacobian)
-of the derivatives, evaluated at the current state of the model. The order of the columns is the same as set for the ``inputs`` portion of ``list_deriv_vars``, and the order of the rows is the same as the order of ``outputs``.
+Now, we just need a function called ``linearize`` that calculates and returns
+a matrix (the Jacobian) of the derivatives, evaluated at the current state of
+the model. OpenMDAO expects the Jacobian to be a dictionary whose keys are a
+tuple of (output, input) pairs. This structure is "sparse" in that if an
+output-input pair is not present, it is assumed to be zero, so we only need
+to specify the ones that are there.
 
 .. testcode:: simple_component_actuatordisk_provideJ
 
-    def provideJ(self):
-        self.J = np.zeros((6, 4))
+        def linearize(self, params, unknowns, resids):
+            """ Jacobian of partial derivatives."""
 
-        # pre-compute commonly needed quantities
-        a_times_area = self.a*self.Area
-        rho_times_vu = self.rho*self.Vu
-        one_minus_a = 1 - self.a 
-        a_area_rho_vu = a_times_area*rho_times_vu
+            a = params['a']
+            Vu = params['Vu']
+            Area = params['Area']
+            rho = params['rho']
+            J = {}
 
-        # d_vr/d_a
-        self.J[0, 0] = - self.Vu
-        # d_vr/d_Vu
-        self.J[0, 3] = 1 - self.a
+            # pre-compute commonly needed quantities
+            a_times_area = a*Area
+            one_minus_a = 1.0 - a
+            a_area_rho_vu = a_times_area*rho*Vu
 
-        # d_vd/d_a
-        self.J[1, 0] = -2*self.Vu
-        # d_vd/d_Vu
-        self.J[1, 3] = 1 - 2*self.a
+            J['Vr', 'a'] = -Vu
+            J['Vr', 'Vu'] = one_minus_a
 
-        # d_ct/d_a
-        self.J[2, 0] = 4 - 8*self.a
+            J['Vd', 'a'] = -2.0*Vu
+            J['Vd', 'Vo'] = 1.0 - 2.0*a
 
-        # d_thrust/d_a
-        self.J[3, 0] = -2.0*self.Area*self.Vu**2*self.a*self.rho + 2.0*self.Area*self.Vu**2*self.rho*one_minus_a
-        # d_thrust/d_area
-        self.J[3, 1] = 2.0*self.Vu**2*self.a*self.rho*one_minus_a
-        # d_thrust/d_rho
-        self.J[3, 2] = 2.0*a_times_area*self.Vu**2*(one_minus_a)
-        # d_thrust/d_Vu
-        self.J[3, 3] = 4.0*a_area_rho_vu*(one_minus_a)
+            J['Ct', 'a'] = 4.0 - 8.0*a
 
-        # d_cp/d_a
-        self.J[4, 0] = 4*self.a*(2*self.a - 2) + 4*(one_minus_a)**2
+            J['thrust', 'a'] = Area*Vu**2 * rho*(-4.0*a + 2.0)
+            J['thrust', 'Area'] = 2.0*Vu**2 * a*rho*one_minus_a
+            J['thrust', 'rho']  = 2.0*a_times_area*Vu**2*(one_minus_a)
+            J['thrust', 'Vu'] = 4.0*a_area_rho_vu*(one_minus_a)
 
-        # d_power/d_a
-        self.J[5, 0] = 2.0*self.Area*self.Vu**3*self.a*self.rho*(2*self.a - 2) + 2.0*self.Area*self.Vu**3*self.rho*one_minus_a**2
-        # d_power/d_area
-        self.J[5, 1] = 2.0*self.Vu**3*self.a*self.rho*one_minus_a**2
-        # d_power/d_rho
-        self.J[5, 2] = 2.0*a_times_area*self.Vu**3*(one_minus_a)**2
-        # d_power/d_vu
-        self.J[5, 3] = 6.0*self.Area*self.Vu**2*self.a*self.rho*one_minus_a**2
+            J['Cp', 'a'] = 4.0*a*(2.0*a - 2.0) + 4.0*(one_minus_a)**2
 
-        return self.J
+            J['power', 'a'] = 2.0*Area*Vu**3 * a*rho*(2.0*a - 2.0) + 2.0*Area*Vu**3 * rho*one_minus_a**2
+            J['power', 'Area'] = 2.0*Vu**3*a*rho*one_minus_a**2
+            J['power', 'rho'] = 2.0*a_times_area*Vu**3 * (one_minus_a)**2
+            J['power', 'Vu'] = 6.0*Area*Vu**2 * a*rho*one_minus_a**2
+
+            return J
+
 
 Running the Optimization, with derivatives
----------------------------
+-------------------------------------------
 
 To summarize, ``actuator_disc_derivatives.py`` is displayed in its entirety below:
 
 .. testcode:: simple_assembly_betzlimit
 
-    from openmdao.main.api import Component
-    from openmdao.lib.datatypes.api import Float
-
-    import numpy as np
+    from openmdao.api import Component
 
     class ActuatorDisc(Component):
         """Simple wind turbine model based on actuator disc theory"""
 
-        # inputs
-        a = Float(.5, iotype="in", desc="Induced Velocity Factor")
-        Area = Float(10, iotype="in", desc="Rotor disc area", units="m**2", low=0)
-        rho = Float(1.225, iotype="in", desc="air density", units="kg/m**3")
-        Vu = Float(10, iotype="in", desc="Freestream air velocity, upstream of rotor", units="m/s")
+        def __init__(self):
+            super(ActuatorDisc, self).__init__()
 
-        # outputs
-        Vr = Float(iotype="out", desc="Air velocity at rotor exit plane", units="m/s")
-        Vd = Float(iotype="out", desc="Slipstream air velocity, dowstream of rotor", units="m/s")
-        Ct = Float(iotype="out", desc="Thrust Coefficient")
-        thrust = Float(iotype="out", desc="Thrust produced by the rotor", units="N")
-        Cp = Float(iotype="out", desc="Power Coefficient")
-        power = Float(iotype="out", desc="Power produced by the rotor", units="W")
+            # Inputs
+            self.add_param('a', 0.5, desc="Induced Velocity Factor")
+            self.add_param('Area', 10.0, units="m**2", lower=0.0,
+                           desc="Rotor disc area")
+            self.add_param('rho', 1.225, units="kg/m**3",
+                           desc="air density")
+            self.add_param('Vu', 10.0, units="m/s",
+                           desc="Freestream air velocity, upstream of rotor")
 
-        def execute(self):
-            # we use 'a' and 'V0' a lot, so make method local variables
+            # Outputs
+            self.add_output('Vr', 0.0, units="m/s",
+                            desc="Air velocity at rotor exit plane")
+            self.add_output('Vd', 0.0, units="m/s",
+                            desc="Slipstream air velocity, downstream of rotor")
+            self.add_output('Ct', 0.0, desc="Thrust Coefficient")
+            self.add_output('thrust', 0.0, units="N",
+                            desc="Thrust produced by the rotor")
+            self.add_output('Cp', 0.0, desc="Power Coefficient")
+            self.add_output('power', 0.0, units="W",
+                            desc="Power produced by the rotor")
 
-            a = self.a
-            Vu = self.Vu
+        def solve_nonlinear(self, params, unknowns, resids):
+            """ Considering the entire rotor as a single disc that extracts
+            velocity uniformly from the incoming flow and converts it to
+            power."""
 
-            qA = .5*self.rho*self.Area*Vu**2
+            a = params['a']
+            Vu = params['Vu']
 
-            self.Vd = Vu*(1-2 * a)
-            self.Vr = .5*(self.Vu + self.Vd)
+            qA = .5*params['rho']*params['Area']*Vu**2
 
-            self.Ct = 4*a*(1-a)
-            self.thrust = self.Ct*qA
+            unknowns['Vd'] = Vd = Vu*(1-2 * a)
+            unknowns['Vr'] = .5*(Vu + Vd)
 
-            self.Cp = self.Ct*(1-a)
-            self.power = self.Cp*qA*Vu
+            unknowns['Ct'] = Ct = 4*a*(1-a)
+            unknowns['thrust'] = Ct*qA
 
-        def provideJ(self):
-            self.J = np.zeros((6, 4))
+            unknowns['Cp'] = Cp = Ct*(1-a)
+            unknowns['power'] = Cp*qA*Vu
+
+        def linearize(self, params, unknowns, resids):
+            """ Jacobian of partial derivatives."""
+
+            a = params['a']
+            Vu = params['Vu']
+            Area = params['Area']
+            rho = params['rho']
+            J = {}
 
             # pre-compute commonly needed quantities
-            a_times_area = self.a*self.Area
-            rho_times_vu = self.rho*self.Vu
-            one_minus_a = 1 - self.a 
-            a_area_rho_vu = a_times_area*rho_times_vu
+            a_times_area = a*Area
+            one_minus_a = 1.0 - a
+            a_area_rho_vu = a_times_area*rho*Vu
 
-            # d_vr/d_a
-            self.J[0, 0] = - self.Vu
-            # d_vr/d_Vu
-            self.J[0, 3] = 1 - self.a
+            J['Vr', 'a'] = -Vu
+            J['Vr', 'Vu'] = one_minus_a
 
-            # d_vd/d_a
-            self.J[1, 0] = -2*self.Vu
-            # d_vd/d_Vu
-            self.J[1, 3] = 1 - 2*self.a
+            J['Vd', 'a'] = -2.0*Vu
+            J['Vd', 'Vo'] = 1.0 - 2.0*a
 
-            # d_ct/d_a
-            self.J[2, 0] = 4 - 8*self.a
+            J['Ct', 'a'] = 4.0 - 8.0*a
 
-            # d_thrust/d_a
-            self.J[3, 0] = -2.0*self.Area*self.Vu**2*self.a*self.rho + 2.0*self.Area*self.Vu**2*self.rho*one_minus_a
-            # d_thrust/d_area
-            self.J[3, 1] = 2.0*self.Vu**2*self.a*self.rho*one_minus_a
-            # d_thrust/d_rho
-            self.J[3, 2] = 2.0*a_times_area*self.Vu**2*(one_minus_a)
-            # d_thrust/d_Vu
-            self.J[3, 3] = 4.0*a_area_rho_vu*(one_minus_a)
+            J['thrust', 'a'] = Area*Vu**2 * rho*(-4.0*a + 2.0)
+            J['thrust', 'Area'] = 2.0*Vu**2 * a*rho*one_minus_a
+            J['thrust', 'rho']  = 2.0*a_times_area*Vu**2*(one_minus_a)
+            J['thrust', 'Vu'] = 4.0*a_area_rho_vu*(one_minus_a)
 
-            # d_cp/d_a
-            self.J[4, 0] = 4*self.a*(2*self.a - 2) + 4*(one_minus_a)**2
+            J['Cp', 'a'] = 4.0*a*(2.0*a - 2.0) + 4.0*(one_minus_a)**2
 
-            # d_power/d_a
-            self.J[5, 0] = 2.0*self.Area*self.Vu**3*self.a*self.rho*(2*self.a - 2) + 2.0*self.Area*self.Vu**3*self.rho*one_minus_a**2
-            # d_power/d_area
-            self.J[5, 1] = 2.0*self.Vu**3*self.a*self.rho*one_minus_a**2
-            # d_power/d_rho
-            self.J[5, 2] = 2.0*a_times_area*self.Vu**3*(one_minus_a)**2
-            # d_power/d_vu
-            self.J[5, 3] = 6.0*self.Area*self.Vu**2*self.a*self.rho*one_minus_a**2
+            J['power', 'a'] = 2.0*Area*Vu**3 * a*rho*(2.0*a - 2.0) + 2.0*Area*Vu**3 * rho*one_minus_a**2
+            J['power', 'Area'] = 2.0*Vu**3*a*rho*one_minus_a**2
+            J['power', 'rho'] = 2.0*a_times_area*Vu**3 * (one_minus_a)**2
+            J['power', 'Vu'] = 6.0*Area*Vu**2 * a*rho*one_minus_a**2
 
-            return self.J
+            return J
 
-        def list_deriv_vars(self):
-            input_keys = ('a', 'Area', 'rho', 'Vu')
-            output_keys = ('Vr', 'Vd','Ct','thrust','Cp','power',)
-            return input_keys, output_keys
+    if __name__ == "__main__":
 
-Modify ``betz_limit.py`` to import ``ActuatorDisc`` from ``actuator_disc_derivatives.py``
-instead of ``actuator_disc.py``. 
+        from openmdao.api import Problem, Group, IndepVarComp
 
+        prob = Problem()
+        prob.root = Group()
+        prob.root.add('disc', ActuatorDisc(), promotes=['a', 'Area', 'rho', 'Vu'])
+
+        prob.root.add('p_a', IndepVarComp('a', 0.5), promotes=['*'])
+        prob.root.add('p_Area', IndepVarComp('Area', 10.0), promotes=['*'])
+        prob.root.add('p_rho', IndepVarComp('rho', 1.225), promotes=['*'])
+        prob.root.add('p_Vu', IndepVarComp('Vu', 10.0), promotes=['*'])
+
+        prob.setup()
+        prob.run()
+
+        prob.check_partial_derivatives()
+
+
+Modify ``betz_limit.py`` to import ``ActuatorDisc`` from
+``actuator_disc_derivatives.py`` instead of ``actuator_disc.py``. Dont'
+forget to change the deriv_options 'type' setting to 'user' so that it solves
+the unified derivatives equations for the gradient.
+
+::
+
+  self.deriv_options['type'] = 'user'
 
 Running ``python betz_limit.py`` we see that the optimization takes less time
 when derivatives are provided.
