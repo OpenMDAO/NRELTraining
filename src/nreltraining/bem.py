@@ -1,16 +1,17 @@
 # Blade Rotor with a specified number of blade elements.
 #
-# INCOMPLETE : may not have been completed for the tutorial course.
+# TODO : Everything in this model needs derivatives.
 #
 
-
 from math import pi, cos, sin, tan
+
+from six.moves import range
 
 import numpy as np
 from scipy.optimize import fsolve
 from scipy.interpolate import interp1d
 
-from openmdao.api import Group, Component
+from openmdao.api import Group, Component, SqliteRecorder, ScipyOptimizer, IndepVarComp
 
 
 class BladeElement(Component):
@@ -43,29 +44,29 @@ class BladeElement(Component):
                        desc="free stream air velocity")
 
         # Outputs
-        self.add_output(V_0, 0.0, units="m/s",
+        self.add_output('V_0', 0.0, units="m/s",
                         desc="axial flow at propeller disk")
-        self.add_output(V_1, 0.0, units="m/s",
+        self.add_output('V_1', 0.0, units="m/s",
                         desc="axial local flow velocity")
-        self.add_output(V_2, 0.0, units="m/s",
+        self.add_output('V_2', 0.0, units="m/s",
                         desc="angular flow at propeller disk")
-        self.add_output(omega, 0.0, units="rad/s",
+        self.add_output('omega', 0.0, units="rad/s",
                         desc="average angular velocity for element")
-        self.add_output(sigma, 0.0,
+        self.add_output('sigma', 0.0,
                         desc="Local solidity")
-        self.add_output(alpha, 0.0, units="rad",
+        self.add_output('alpha', 0.0, units="rad",
                         desc="local angle of attack")
-        self.add_output(delta_Ct, 0.0, units="N",
+        self.add_output('delta_Ct', 0.0, units="N",
                         desc="section thrust coefficient")
-        self.add_output(delta_Cp, 0.0,
+        self.add_output('delta_Cp', 0.0,
                         desc="section power coefficent")
-        self.add_output(a, 0.0,
+        self.add_output('a', 0.0,
                         desc="converged value for axial inflow factor")
-        self.add_output(b, 0.0,
+        self.add_output('b', 0.0,
                         desc="converged value for radial inflow factor")
-        self.add_output(lambda_r, 8.0,
+        self.add_output('lambda_r', 8.0,
                         desc="local tip speed ratio")
-        self.add_output(phi, 1.487, units="rad",
+        self.add_output('phi', 1.487, units="rad",
                         desc="relative flow angle onto blades")
 
         # rough linear interpolation from naca 0012 airfoil data
@@ -76,6 +77,9 @@ class BladeElement(Component):
         rad = np.array([0., 10, 20, 30, 40])*pi/180
         self.cd_interp = interp1d(rad, [0., 0., 0.3, 0.6, 1.], fill_value=0.001,
                                   bounds_error=False)
+
+        # TODO: Analytic Derivatives
+        self.deriv_options['type'] = 'fd'
 
     def _coeff_lookup(self, i):
         C_L = self.cl_interp(i)
@@ -92,10 +96,10 @@ class BladeElement(Component):
         rpm = params['rpm']
         V_inf = params['V_inf']
 
-        sigma = B*chord / (2.0 * np.pi * r)
+        unknowns['sigma'] = B*chord / (2.0 * np.pi * r)
         omega = rpm*2*pi/60.0
         omega_r = omega*r
-        unknowns['lambda_r'] = omega*r/V_inf  # need lambda_r for iterates
+        unknowns['lambda_r'] = omega_r/V_inf  # need lambda_r for iterates
 
         a, b = fsolve(self._iteration, [params['a_init'], params['b_init']],
                       args = [params, unknowns])
@@ -114,7 +118,6 @@ class BladeElement(Component):
         unknowns['delta_Ct'] = q_c*(C_L*cos_phi-C_D*sin_phi)/(.5*rho*(V_inf**2)*(pi*r**2))
         unknowns['delta_Cp'] = b*(1.0-a)*unknowns['lambda_r']**3*(1.0-C_D/C_L*tan(phi))
 
-        unknowns['sigma'] = sigma
         unknowns['omega'] = omega
         unknowns['a'] = a
         unknowns['b'] = b
@@ -122,10 +125,12 @@ class BladeElement(Component):
         unknowns['V_1'] = V_1
         unknowns['V_2'] = V_2
 
-    def _iteration(self, X, params, unknowns):
+    def _iteration(self, X, args):
+
+        params, unknowns = args
 
         twist = params['twist']
-        sigma = params['sigma']
+        sigma = unknowns['sigma']
         lambda_r = unknowns['lambda_r']
 
         phi = np.arctan(lambda_r*(1 + X[1])/(1 - X[0]))
@@ -155,7 +160,7 @@ class BEMPerf(Component):
 
         self.add_param('r', 0.8, units='m',
                        desc="tip radius of the rotor")
-        self.add_param('rpm', 2100, lower=0.0, units="min**-1",
+        self.add_param('rpm', 2100.0, lower=0.0, units="min**-1",
                        desc="rotations per minute")
 
         # "Variable Tree" FlowConditions
@@ -188,6 +193,9 @@ class BEMPerf(Component):
         self.add_param('lambda_r', np.ones((n, )),
                        desc='lambda_r from %d different blade elements' % n)
 
+        # TODO: Analytic Derivatives
+        self.deriv_options['type'] = 'fd'
+
     def solve_nonlinear(self, params, unknowns, resids):
 
         V_inf = params['free_stream:V']
@@ -213,6 +221,79 @@ class BEMPerf(Component):
         unknowns['data:Cp'] = Cp
 
 
+class LinearDistribution(Component):
+    """Takes two Float inputs and provides n Float outputs with a linear
+    variation between them. Units can be optionally provided. If use_array is
+    True (default), then the output is an array. Otherwise, the output will
+    be a set of separate variables"""
+
+    def __init__(self, n=3, units=None, use_array=True):
+        super(LinearDistribution, self).__init__()
+
+        self._n = n
+
+        self.add_param('offset', 0.0, units=units,
+                       desc="offset applied to the linear distribution outputs")
+        self.add_param('start', 0.0, units=units,
+                       desc="input closest to the hub")
+        self.add_param('end', 0.0, units=units,
+                       desc="input closest to the tip")
+
+        self.add_output('delta', 0.0, units=units,
+                        desc='step size for each of the %d levels' % n)
+
+        if use_array:
+            self.add_output('output', np.ones((n, )), units=units,
+                            desc='linearly spaced values from start to end inclusive of the bounds')
+
+        else:
+            for i in range(0, n):
+                self.add_output('output_%d'%i, 0.0, units=units,
+                                desc="linearaly spaced output %d" % i)
+
+        # TODO: Analytic Derivatives
+        self.deriv_options['type'] = 'fd'
+
+    def solve_nonlinear(self, params, unknowns, resids):
+
+        out = np.linspace(params['start'], params['end'], self._n) + params['offset']
+
+        unknowns['output']= out
+        unknowns['delta'] = out[1] - out[0]
+
+
+class Mux(Component):
+    """ Combine a bunch of scalars into a single vector."""
+
+    def __init__(self, n=3, units=None):
+        super(Mux, self).__init__()
+
+        self._n = n
+
+        if units:
+            for i in range(0, n):
+                self.add_param('scalar_%d' % i, 0.0, units=units,
+                                desc="scalar %d" % i)
+
+            self.add_output('vector', np.ones((n, )), units=units,
+                            desc="vector")
+        else:
+            for i in range(0, n):
+                self.add_param('scalar_%d' % i, 0.0, desc="scalar %d" % i)
+
+            self.add_output('vector', np.ones((n, )), desc="vector")
+
+
+        # TODO: Analytic Derivatives
+        self.deriv_options['type'] = 'fd'
+
+    def solve_nonlinear(self, params, unknowns, resids):
+
+        n = self._n
+        for i in range(0, n):
+            unknowns['vector'][i] = params['scalar_%d' % i]
+
+
 class AutoBEM(Group):
     """Blade Rotor with user specified number BladeElements"""
 
@@ -226,22 +307,30 @@ class AutoBEM(Group):
         """
         super(AutoBEM, self).__init__()
 
-        ## physical properties inputs
-        #r_hub = Float(0.2, iotype="in", desc="blade hub radius", units="m", low=0)
-        #twist_hub = Float(29, iotype="in", desc="twist angle at the hub radius", units="deg")
-        #chord_hub = Float(.7, iotype="in", desc="chord length at the rotor hub", units="m", low=.05)
-        #r_tip = Float(5, iotype="in", desc="blade tip radius", units="m")
-        #twist_tip = Float(-3.58, iotype="in", desc="twist angle at the tip radius", units="deg")
-        #chord_tip = Float(.187, iotype="in", desc="chord length at the rotor hub", units="m", low=.05)
-        #pitch = Float(0, iotype="in", desc="overall blade pitch", units="deg")
-        #rpm = Float(107, iotype="in", desc="rotations per minute", low=0, units="min**-1")
-        #B = Int(3, iotype="in", desc="number of blades", low=1)
+        # physical properties inputs
+        self.add('p_r_hub', IndepVarComp('r_hub', 0.2, units="m"),
+                 promotes=['*'])
+        self.add('p_twist_hub', IndepVarComp('twist_hub', 29.0, units="deg"),
+                 promotes=['*'])
+        self.add('p_chord_hub', IndepVarComp('chord_hub', 0.7, units="m", lower=.05),
+                 promotes=['*'])
+        self.add('p_r_tip', IndepVarComp('r_tip', 5.0, units="m"),
+                 promotes=['*'])
+        self.add('p_twist_tip', IndepVarComp('twist_tip', -3.58, units="deg"),
+                 promotes=['*'])
+        self.add('p_chord_tip', IndepVarComp('chord_tip', 0.187, units="m", lower=.05),
+                 promotes=['*'])
+        self.add('p_pitch', IndepVarComp('pitch', 0.0, units="deg"),
+                 promotes=['*'])
+        self.add('p_rpm', IndepVarComp('rpm', 107.0, units="min**-1"),
+                 promotes=['*'])
+        self.add('p_B', IndepVarComp('B', 3, lower=1), promotes=['*'])
 
-        ## wind condition inputs
-        #free_stream = VarTree(FlowConditions(), iotype="in")
-        #self.add('free_stream', VarTree(FlowConditions(), iotype="in"))  # initialize
-
-        self.add('driver', SLSQPdriver())
+        # wind condition inputs
+        self.add('p_fs_rho', IndepVarComp('free_stream:rho', 1.225, units="kg/m**3"),
+                 promotes=['*'])
+        self.add('p_fs_V', IndepVarComp('free_stream:V', 7.0, units="m/s"),
+                 promotes=['*'])
 
         self.add('radius_dist', LinearDistribution(n=n_elements, units="m"))
         self.connect('r_hub', 'radius_dist.start')
@@ -251,72 +340,88 @@ class AutoBEM(Group):
         self.connect('chord_hub', 'chord_dist.start')
         self.connect('chord_tip', 'chord_dist.end')
 
-        self.add('twist_dist', LinearDistribution(n=n_elements, units="deg"))
+        self.add('twist_dist', LinearDistribution(n=n_elements, units="rad"))
         self.connect('twist_hub', 'twist_dist.start')
         self.connect('twist_tip', 'twist_dist.end')
         self.connect('pitch', 'twist_dist.offset')
 
-        self.driver.workflow.add('chord_dist')
-        self.driver.workflow.add('radius_dist')
-        self.driver.workflow.add('twist_dist')
-
-        self.add('perf', BEMPerf(n=n_elements))
-        self.create_passthrough('perf.data')
+        self.add('perf', BEMPerf(n=n_elements), promotes=['data:*'])
         self.connect('r_tip', 'perf.r')
         self.connect('rpm', 'perf.rpm')
-        self.connect('free_stream', 'perf.free_stream')
+        self.connect('free_stream:rho', 'perf.free_stream:rho')
+        self.connect('free_stream:V', 'perf.free_stream:V')
+
+        self.add('mux_delta_Ct', Mux(n_elements, units="N"))
+        self.add('mux_delta_Cp', Mux(n_elements))
+        self.add('mux_lambda_r', Mux(n_elements))
 
         for i in range(n_elements):
 
             name = 'BE%d' % i
             self.add(name, BladeElement())
-            self.driver.workflow.add(name)
 
-            self.connect('radius_dist.output[%d]' % i, name+'.r')
+            self.connect('radius_dist.output', name+'.r', src_indices=[i])
             self.connect('radius_dist.delta', name+'.dr')
-            self.connect('twist_dist.output[%d]' % i, name+'.twist')
-            self.connect('chord_dist.output[%d]' % i, name+".chord")
+            self.connect('twist_dist.output', name+'.twist', src_indices=[i])
+            self.connect('chord_dist.output', name+".chord", src_indices=[i])
 
             self.connect('B', name+'.B')
             self.connect('rpm', name+'.rpm')
 
-            self.connect('free_stream.rho', name+'.rho')
-            self.connect('free_stream.V', name+'.V_inf')
-            self.connect(name+'.delta_Ct', 'perf.delta_Ct[%d]' % i)
+            self.connect('free_stream:rho', name+'.rho')
+            self.connect('free_stream:V', name+'.V_inf')
 
-            self.connect(name+'.delta_Cp', 'perf.delta_Cp[%d]' % i)
-            self.connect(name+'.lambda_r', 'perf.lambda_r[%d]' % i)
+            self.connect(name+'.delta_Ct', 'mux_delta_Ct.scalar_%d' % i)
+            self.connect(name+'.delta_Cp', 'mux_delta_Cp.scalar_%d' % i)
+            self.connect(name+'.lambda_r', 'mux_lambda_r.scalar_%d' % i)
 
-        self.driver.workflow.add('perf')
-
-        # set up optimization
-        self.driver.add_parameter('chord_hub', low=.1, high=2)
-        self.driver.add_parameter('chord_tip', low=.1, high=2)
-        self.driver.add_parameter('twist_hub', low=-5, high=50)
-        self.driver.add_parameter('twist_tip', low=-5, high=50)
-        self.driver.add_parameter('rpm', low=20, high=300)
-        self.driver.add_parameter('r_tip', low=1, high=10)
-
-        self.driver.add_objective('-data.Cp')
+        self.connect('mux_delta_Ct.vector', 'perf.delta_Ct')
+        self.connect('mux_delta_Cp.vector', 'perf.delta_Cp')
+        self.connect('mux_lambda_r.vector', 'perf.lambda_r')
 
 
 if __name__ == "__main__":
 
-    top = AutoBEM(6)
+    from openmdao.api import Problem
+
+    top = Problem()
+    root = top.root = AutoBEM(6)
+
+    #from openmdao.api import pyOptSparseDriver
+    #driver = top.driver = pyOptSparseDriver()
+    #driver.options['optimizer'] = 'SNOPT'
+    #driver = top.driver
+
+    driver = top.driver = ScipyOptimizer()
+    driver.options['optimizer'] = 'SLSQP'
+
+    # set up optimization
+    driver.add_desvar('chord_hub', lower=.1, upper=2)
+    driver.add_desvar('chord_tip', lower=.1, upper=2)
+    driver.add_desvar('twist_hub', lower=-5, upper=50)
+    driver.add_desvar('twist_tip', lower=-5, upper=50)
+    driver.add_desvar('rpm', lower=20, upper=300)
+
+    # Test turns this off
+    driver.add_desvar('r_tip', lower=1, upper=10)
+
+    driver.add_objective('data:Cp', scaler=-1.0)
+
+    # For now, FD the whole model at once
+    root.deriv_options['type'] = 'fd'
+
 
     # set up case recording
-    JSON_recorder = JSONCaseRecorder('bem.json')
-    top.recorders = [JSON_recorder]
+    recorder = SqliteRecorder('bem.sql')
+    driver.recorder = recorder
 
+    top.setup()
     top.run()
 
     print
     print
-    print "rpm:", top.rpm
-    print "cp:", top.data.Cp
-    print 'top.b.chord_hub: ', top.chord_hub
-    print 'top.b.chord_tip: ', top.chord_tip
-    print 'lambda: ', top.perf.data.tip_speed_ratio
-
-    cds = CaseDataset("bem.json", 'json')
-    caseset_query_to_html(cds.data)
+    print "rpm:", top['rpm']
+    print "cp:", top['data:Cp']
+    print 'top.b.chord_hub: ', top['chord_hub']
+    print 'top.b.chord_tip: ', top['chord_tip']
+    print 'lambda: ', top['data:tip_speed_ratio']

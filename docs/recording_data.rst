@@ -108,26 +108,79 @@ were recorded. The name 'rank0:SLSQP/1' includes the processor rank for
 multiprocessing (always 'rank0' for serial runs), the driver name ('SLSQP')
 and the iteration number (this is the first iteration, so 1.)
 
+If we take a look at one of these cases,
+
+::
+
+    case = db['rank0:SLSQP/9']
+    print(case.keys())
+
+we find that it is also a dictionary with the following keys:
 
 ::
 
     ['timestamp', 'success', 'msg', 'Unknowns']
 
+Here, 'timestamp' is the time this iteration completed, 'success' is a flag
+that indicates if that case executed succesfully, 'msg' contains any error
+message that was raised, and 'unknowns' contains the data.
+
+If we drill down a little bit further
+
+::
+
+    unknowns = case['Unknowns']
+    print(unknowns.keys())
+
+We get a list of variables that were saved for this case.
+
 ::
 
     ['a', 'Area', 'aDisc.Ct', 'aDisc.Vr', 'aDisc.Cp', 'aDisc.power', 'Vu', 'rho', 'aDisc.Vd', 'aDisc.thrust']
 
-We can print, plot, and analyze this data directly:
+One final dictionary access gives us the value of any variable for this iteration.
+
+Finally, let us write some code so that we can grab all of the data and pull out some points to plot:
 
 ::
 
+    import sqlitedict
     import matplotlib.pyplot as plt
 
-    for area, cp in our_data:
-        plt.plot(area, cp, "ko")
-        plt.xlabel("a")
-        plt.ylabel("Cp")
+    # Now, let's make a function that makes it easier to pull data from all the
+    # case points.
+    def extract_all_vars_sql(name):
+        """ Reads in the file given in name and extracts all variables."""
 
+        db = sqlitedict.SqliteDict( name, 'openmdao' )
+
+        data = {}
+        for iteration in range(len(db)-1):
+            iteration_coordinate = 'rank0:SLSQP/{}'.format(iteration + 1 )
+
+            try:
+                record = db[iteration_coordinate]
+            except KeyError:
+                break
+
+            for key, value in record['Unknowns'].items():
+                if key not in data:
+                    data[key] = []
+                data[key].append(value)
+
+        return data
+
+    # Pick some that we want
+    data = extract_all_vars_sql('betz_limit.sql')
+    a = data['a']
+    Cp = data['aDisc.Cp']
+
+
+    # Finally make some plots
+    for area, cp in zip(a, Cp):
+        plt.plot(area, cp, "ko")
+    plt.xlabel("a")
+    plt.ylabel("Cp")
     plt.show()
 
 
